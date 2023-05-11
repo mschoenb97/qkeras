@@ -730,14 +730,15 @@ class quantized_linear(BaseQuantizer):
     """Get bounds of clip range"""
 
     if self.use_sign_function:
-      clip_min = K.cast_to_floatx(-0.5)
-      clip_max = K.cast_to_floatx(0.5)
+      clip_min = -0.5
+      clip_max = 0.5
     else:
-      unsigned_bits_po2 = K.pow(2.0, self.bits - self.keep_negative)
+      # use numpy to compute powers of 2
+      unsigned_bits_po2 = np.power(2.0, self.bits - self.keep_negative)
       # if symmetric, clip_min is negative of clip_max. Otherwise clip_min is
       # lowered by 1, giving us one more representable number
       clip_min = self.keep_negative * (-unsigned_bits_po2 + self.symmetric)
-      clip_max = unsigned_bits_po2 - K.cast_to_floatx(1.0)
+      clip_max = unsigned_bits_po2 - 1.0
 
     return clip_min, clip_max
   
@@ -763,10 +764,8 @@ class quantized_linear(BaseQuantizer):
   def __call__(self, x):
     """Core quantization function"""
 
-    # Data type conversion
-    x = K.cast_to_floatx(x)
-    
-    shape = x.shape
+    # using CPU for quantization
+    x = np.array(x)
 
     if self.auto_alpha:
       # get data-dependent quantization scale
@@ -780,9 +779,6 @@ class quantized_linear(BaseQuantizer):
     xq = scaled_xq * quantization_scale
 
     res = x + self.qnoise_factor * (xq - x)
-
-    # Needed to deal with tf not knowing shape of output
-    res.set_shape(shape)
 
     return res
   
@@ -828,26 +824,27 @@ class quantized_linear(BaseQuantizer):
     """Get the minimum floating point scale that does not clip the max 
     of x"""
 
-    axis = _get_scaling_axis(self.scale_axis, tf.rank(x))
+    # get rank of x using numpy
+    axis = _get_scaling_axis(self.scale_axis, np.ndim(x))
 
     clip_min, clip_max = self.clip_bounds
     clip_range = clip_max - clip_min
     
     if self.keep_negative:
-      data_max = K.max(tf.math.abs(x), axis=axis, keepdims=True)
+      data_max = np.max(np.abs(x), axis=tuple(axis), keepdims=True)
       quantization_scale = (data_max * 2) / clip_range
     else:
-      data_max = K.max(x, axis=axis, keepdims=True)
+      data_max = np.max(x, axis=tuple(axis), keepdims=True)
       quantization_scale = data_max / clip_range
 
-    return tf.math.maximum(quantization_scale, K.epsilon())
+    return np.maximum(quantization_scale, K.epsilon())
 
   def _po2_autoscale(self, x, quantization_scale):
     """Get an approximation of the "best" po2 scale using least squares"""
 
     # set alpha scale to a near power of two
-    quantization_scale = K.pow(2.0, 
-                         tf.math.round(K.log(quantization_scale + K.epsilon()) / 
+    quantization_scale = np.power(2.0, 
+                         np.round(K.log(quantization_scale + K.epsilon()) / 
                                        K.log(2.0)))
 
     # For 1-bit quantization, po2 autoscale loop is guaranteed to converge
@@ -902,12 +899,10 @@ class quantized_linear(BaseQuantizer):
       return K.cast_to_floatx([self.max(), self.min()])
     else:
       clip_min, clip_max = self.clip_bounds
-      clip_max = tf.cast(clip_max, tf.int32)
-      clip_min = tf.cast(clip_min, tf.int32)
-      pos_array = K.cast_to_floatx(tf.range(clip_max + 1))
-      neg_array = K.cast_to_floatx(tf.range(clip_min, 0))
+      pos_array = K.cast_to_floatx(range(clip_max + 1))
+      neg_array = K.cast_to_floatx(range(clip_min, 0))
 
-      return self.quantization_scale * tf.concat([pos_array, neg_array], axis=0)
+      return self.quantization_scale * np.concat([pos_array, neg_array], axis=0)
     
   def __str__(self):
 
