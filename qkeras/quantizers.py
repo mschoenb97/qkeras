@@ -775,26 +775,17 @@ class quantized_linear(BaseQuantizer):
   def clip_bounds(self):
     """Get bounds of clip range"""
 
-    def _standard_bounds():
-      """Get bounds for standard quantization"""
-      unsigned_bits_po2 = K.pow(2.0, self.bits - self.keep_negative)
-      # if symmetric, clip_min is negative of clip_max. Otherwise clip_min is
-      # lowered by 1, giving us one more representable number
-      clip_min = self.keep_negative * (-unsigned_bits_po2 + self.symmetric)
-      clip_max = unsigned_bits_po2 - K.cast_to_floatx(1.0)
-      return clip_min, clip_max
+    unsigned_bits_po2 = K.pow(2.0, self.bits - self.keep_negative)
+    # if symmetric, clip_min is negative of clip_max. Otherwise clip_min is
+    # lowered by 1, giving us one more representable number
+    clip_min = self.keep_negative * (-unsigned_bits_po2 + self.symmetric)
+    clip_max = unsigned_bits_po2 - K.cast_to_floatx(1.0)
 
-    def _sign_function_bounds():
-      """Get bounds for sign function"""
-      clip_min = K.cast_to_floatx(-0.5)
-      clip_max = K.cast_to_floatx(0.5)
-      return clip_min, clip_max
+    shift = K.cast_to_floatx(self.use_sign_function) * K.cast_to_floatx(0.5)
+    clip_min = clip_min - shift
+    clip_max = clip_max + shift
 
-    return tf.cond(
-      self.use_sign_function,
-      _sign_function_bounds,
-      _standard_bounds
-    )
+    return clip_min, clip_max
   
   def _set_default_quantization_scale(self):
     """Calculate and set quantization_scale default"""
@@ -898,22 +889,8 @@ class quantized_linear(BaseQuantizer):
     clip_min, clip_max = self.clip_bounds
     clip_range = clip_max - clip_min
 
-    def quantization_scale_keep_negative():
-      """Get alpha scale when keeping negative values"""
-
-      return (K.max(tf.math.abs(x), axis=axis, keepdims=True) *
-              2) / clip_range
-
-    def quantization_scale_no_negative():
-      """Get alpha scale when dropping negative values"""
-
-      return K.max(x, axis=axis, keepdims=True) / clip_range
-
-    quantization_scale = tf.cond(
-        tf.equal(self.keep_negative, 1.0),
-        quantization_scale_keep_negative,
-        quantization_scale_no_negative,
-    )
+    max_data = K.max(tf.math.abs(x), axis=axis, keepdims=True)
+    quantization_scale = max_data * (1 + self.keep_negative) / clip_range
 
     return tf.math.maximum(quantization_scale, K.epsilon())
 
@@ -951,9 +928,8 @@ class quantized_linear(BaseQuantizer):
 
     # For 1-bit quantization, po2 autoscale loop is guaranteed to converge
     # after 1 iteration 
-    max_iterations = tf.cond(self.use_sign_function,
-                             lambda: tf.constant(1),
-                             lambda: tf.constant(5))
+    discount = K.cast_to_floatx(self.use_sign_function) * tf.constant(4.0)
+    max_iterations = tf.cast(tf.constant(5.0) - discount, dtype=tf.int32)
 
     _, quantization_scale = tf.while_loop(
         loop_cond,
