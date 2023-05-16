@@ -831,10 +831,10 @@ class quantized_linear(BaseQuantizer):
     
     if self.keep_negative:
       data_max = K.max(tf.math.abs(x), axis=axis, keepdims=True)
-      quantization_scale = (data_max * 2) / clip_range
+      quantization_scale = (data_max * 2) / (clip_range + 1)
     else:
       data_max = K.max(x, axis=axis, keepdims=True)
-      quantization_scale = data_max / clip_range
+      quantization_scale = data_max / (clip_range + 1)
 
     return tf.math.maximum(quantization_scale, K.epsilon())
 
