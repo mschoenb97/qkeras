@@ -26,9 +26,10 @@ class quantized_ewgs(BaseQuantizer):
     - We're treating delta as a hyperparameter here
     - In the EWGS code, u and l are initialized based on these LOCs:
       https://github.com/cvlab-yonsei/EWGS/blob/main/ImageNet/custom_modules.py#L109-L117
-      Note that the `x` value in this case is the input to the activation on the first pass.
-      Afaik, it's not possible to use this information for initialization in Keras.
-      Tbd what the best way to initialize these values is.
+      Note that the `x` value in this case is the input to the activation on the first pass,
+      and the weight and activation data come from pre-trained full-precision 
+      models. I believe it's best to compute these elsewhere and port them in here. 
+      Also, see section 4 of https://arxiv.org/pdf/2104.00903.pdf for more info.
   
   """
     
@@ -51,7 +52,7 @@ class quantized_ewgs(BaseQuantizer):
   def get_xn(self, x):
 
     scaled = (x - self.l) / (self.u - self.l)
-    return K.clip(scaled, 0, 1)
+    return K.clip(scaled, 0.0, 1.0)
   
   @tf.custom_gradient
   def get_xq(self, xn):
@@ -65,16 +66,28 @@ class quantized_ewgs(BaseQuantizer):
       
     return xq, grad
 
-  def call(self, x):
+  def __call__(self, x):
 
     xn = self.get_xn(x)
     xq = self.get_xq(xn)
+
+    tf.print("PARAMS: u: ", self.u)
+    tf.print("PARAMS: l: ", self.l)
+    tf.print("PARAMS: ")
 
     if self.activation:
       res = xq
     else:
       res = 2 * (xq - 0.5)
     return res
+  
+  def max(self):
+
+    return 1.0
+  
+  def min(self):
+
+    return 0.0 if self.activation else -1.0
   
 
 class QActivationEWGS(Layer, PrunableLayer):
@@ -88,7 +101,8 @@ class QActivationEWGS(Layer, PrunableLayer):
       initialization logic for this parameter is here:
       https://github.com/cvlab-yonsei/EWGS/blob/main/ImageNet/custom_modules.py#L121
       Since we don't have access to the input to the activation on the first
-      pass, and this value is approximately 1, we initialize it to 1.
+      pass, and this value is approximately 1, we initialize it to 1. Can be more precise
+      if necessary.
       
   """
   
@@ -96,14 +110,13 @@ class QActivationEWGS(Layer, PrunableLayer):
 
     super(QActivationEWGS, self).__init__()
 
-    self.quantizer = quantized_ewgs(*quantizer_args, **quantizer_kwargs, activation=True)
-    self.scale = self.add_weight(
-        name="scale",
-        shape=(1,),
-        initializer="ones",
-        trainable=True)
+    quantizer_kwargs['activation'] = True
+    self.quantizer = quantized_ewgs(*quantizer_args, **quantizer_kwargs)
+    self.scale = self.add_weight(shape=(), initializer='ones', trainable=True)
 
   def call(self, inputs):
+
+    tf.print("PARAMS: scale: ", self.scale)
     return self.quantizer(inputs) * self.scale
 
   def compute_output_shape(self, input_shape):
@@ -111,4 +124,61 @@ class QActivationEWGS(Layer, PrunableLayer):
 
   def get_prunable_weights(self):
     return []
+  
+
+if __name__ == '__main__':
+
+  # # run tensorflow in eager mode
+  # tf.config.run_functions_eagerly(True)
+
+  from tensorflow import keras
+  from tensorflow.keras import layers
+  import qkeras as qk
+
+  def create_gpu_strategy():
+    tf.debugging.set_log_device_placement(True)
+    gpus = tf.config.list_logical_devices('GPU')
+    strategy = tf.distribute.MirroredStrategy(gpus)
+    return strategy
+
+  strategy = create_gpu_strategy()
+
+  # with strategy.scope():
+  if True:
+
+    (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+
+    test = False
+
+    if test:
+      # subsample 1% data
+      x_train = x_train[:600]
+      y_train = y_train[:600]
+      x_test = x_test[:100]
+      y_test = y_test[:100]
+
+    def ewgs_quantizer():
+
+      return quantized_ewgs(4, -1.0, 1.0, 0.1)
+
+    inputs = keras.Input(shape=(28, 28, 1))
+    x = layers.Rescaling(1./255)(inputs)
+    x = qk.QConv2D(
+        filters=32, kernel_size=3, kernel_quantizer=ewgs_quantizer(),
+        bias_quantizer=ewgs_quantizer())(x)
+    x = QActivationEWGS(4, 0.0, 1.0, 0.1)(x)
+    x = layers.Flatten()(x)
+    x = qk.QDense(10, kernel_quantizer=ewgs_quantizer(),
+        bias_quantizer=ewgs_quantizer())(x)
+    outputs = layers.Activation("softmax", name="softmax")(x)
+    model = keras.Model(inputs=inputs, outputs=outputs)
+
+    model.compile(optimizer='rmsprop',
+                  loss="sparse_categorical_crossentropy",
+                  metrics=["accuracy"])
+    
+    print(model.summary())
+
+    history = model.fit(x_train, y_train, epochs=1, batch_size=64, 
+                        validation_data=(x_test, y_test))
   
