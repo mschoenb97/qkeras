@@ -17,9 +17,7 @@ from tensorflow_model_optimization.python.core.sparsity.keras.prunable_layer imp
 # update path so that we have access to qkeras
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-from qkeras import BaseQuantizer
-
-class quantized_ewgs(BaseQuantizer):
+class quantized_ewgs(Layer):
   """Quantizer for element-wise gradient scaling.
   
   Notes:
@@ -30,6 +28,9 @@ class quantized_ewgs(BaseQuantizer):
       and the weight and activation data come from pre-trained full-precision 
       models. I believe it's best to compute these elsewhere and port them in here. 
       Also, see section 4 of https://arxiv.org/pdf/2104.00903.pdf for more info.
+    - This needs to be a subclass of Layer so that the variables can be
+      trainable.
+    - Scale parameters are constants here, NOT per-channel tensors
   
   """
     
@@ -46,8 +47,15 @@ class quantized_ewgs(BaseQuantizer):
     self.activation = activation
     self.delta = delta
 
-    self.u = tf.Variable(u_initial_value, trainable=True)
-    self.l = tf.Variable(l_initial_value, trainable=True)
+    # create weights for u and l with constant initial values
+    self.u = self.add_weight(
+      shape=(),
+      initializer=tf.constant_initializer(u_initial_value), 
+      trainable=True)
+    self.l = self.add_weight(
+      shape=(),
+      initializer=tf.constant_initializer(l_initial_value), 
+      trainable=True)
 
   def get_xn(self, x):
 
@@ -70,10 +78,6 @@ class quantized_ewgs(BaseQuantizer):
 
     xn = self.get_xn(x)
     xq = self.get_xq(xn)
-
-    tf.print("PARAMS: u: ", self.u)
-    tf.print("PARAMS: l: ", self.l)
-    tf.print("PARAMS: ")
 
     if self.activation:
       res = xq
@@ -116,7 +120,6 @@ class QActivationEWGS(Layer, PrunableLayer):
 
   def call(self, inputs):
 
-    tf.print("PARAMS: scale: ", self.scale)
     return self.quantizer(inputs) * self.scale
 
   def compute_output_shape(self, input_shape):
@@ -127,9 +130,6 @@ class QActivationEWGS(Layer, PrunableLayer):
   
 
 if __name__ == '__main__':
-
-  # # run tensorflow in eager mode
-  # tf.config.run_functions_eagerly(True)
 
   from tensorflow import keras
   from tensorflow.keras import layers
@@ -143,8 +143,7 @@ if __name__ == '__main__':
 
   strategy = create_gpu_strategy()
 
-  # with strategy.scope():
-  if True:
+  with strategy.scope():
 
     (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
 
